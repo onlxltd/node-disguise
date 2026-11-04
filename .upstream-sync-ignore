@@ -1,0 +1,22 @@
+# These exclusions are relative to the root of node-disguise-dev.
+# Keep this repository's Git metadata, workflow, and sync rules.
+/.git/
+/.github/
+/.upstream/
+/.upstream-sync-ignore
+/.gitattributes
+/node_modules/
+/dist/
+/coverage/
+/.yarn/
+/.DS_Store
+
+# Files intentionally omitted from this package.
+/UPSTREAM.md
+/d3.pyi
+/upstream-manifest.json
+/scripts/
+/tests/
+/README.md
+/LICENSE
+/package.json
