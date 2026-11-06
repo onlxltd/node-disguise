@@ -1,6 +1,6 @@
 # node-disguise
 
-Native Node.js and TypeScript client for connecting to a Disguise Designer plugin endpoint. It provides typed access to Designer objects and expressions, session transports, and live updates.
+Native Node.js and TypeScript client for connecting to a Disguise instance. It provides typed access to Designer objects and expressions, session transports, and live updates.
 
 node-disguise is supported by [ON LX Limited](https://onlx.ltd/?src=node-disguise). Check out our projects such as [Ctrl Suite](https://onlx.ltd/ctrl-suite?src=node-disguise) and [Ctrl for iPad](https://onlx.ltd/ctrl-for-ipad?src=node-disguise).
 
