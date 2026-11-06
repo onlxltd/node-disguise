@@ -1,7 +1,8 @@
 {
     "name": "node-disguise",
+    "displayName": "Node Disguise",
     "version": "1.0.0",
-    "description": "Native Node.js/TypeScript client for Disguise Designer plugins",
+    "description": "Native Node.js/TypeScript client for Disguise Designer",
     "author": {
         "name": "ON LX Limited"
     },
