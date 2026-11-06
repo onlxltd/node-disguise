@@ -1,5 +1,8 @@
 import { D3Session } from "./session.js";
 import { LiveUpdate } from "./live-update.js";
+import { Common } from "./common.js";
+import { Query } from "./query.js";
+import { TransportClient } from "./transports.js";
 import {
     D3_MEMBER_METADATA,
     type D3Globals,
@@ -11,7 +14,7 @@ export interface PythonExpression {
 }
 
 export type DesignerType<T> = PythonExpression & {
-    readonly __designerType?: T;
+    readonly __designerType: T;
 };
 
 export type DesignerPathNode = {
@@ -29,9 +32,7 @@ type DesignerMembers<T> = {
     [K in keyof T as K extends "map" | number ? never : K]: T[K] extends (
         ...args: infer Arguments
     ) => infer Return
-        ? (
-              ...args: DesignerArguments<Arguments>
-          ) => Promise<DesignerResult<Return>>
+        ? (...args: DesignerArguments<Arguments>) => DesignerCall<Return>
         : DesignerProperty<T[K]>;
 };
 
@@ -42,18 +43,28 @@ type DesignerCollection<T> = {
     ): DesignerProperty<ReadonlyArray<UnwrapDesigner<U>>>;
 };
 
+type DesignerTimeSequence<T> = {
+    map<U>(
+        callback: (item: DesignerValue<T>, index: DesignerValue<number>) => U,
+    ): DesignerProperty<ReadonlyArray<UnwrapDesigner<U>>>;
+};
+
 export type DesignerValue<T> = PythonExpression & {
     readonly __designerValue?: T;
 } & (T extends ReadonlyArray<infer Item>
         ? DesignerCollection<Item> & DesignerMembers<T>
-        : DesignerMembers<T>);
+        : T extends { n(): number; getV(i: number): infer Item }
+          ? DesignerTimeSequence<Item> & DesignerMembers<T>
+          : DesignerMembers<T>);
 
 type DesignerProperty<T> = DesignerValue<T> & {
     get(): Promise<DesignerResult<T>>;
     execute(): Promise<DesignerResult<T>>;
 };
 
-type UnwrapDesigner<T> =
+type DesignerCall<T> = DesignerValue<T> & PromiseLike<DesignerResult<T>>;
+
+export type UnwrapDesigner<T> =
     T extends DesignerProperty<infer Value>
         ? Value
         : T extends ReadonlyArray<infer Item>
@@ -68,7 +79,7 @@ type DesignerArguments<T extends readonly unknown[]> = {
         : T[K];
 };
 
-type DesignerResult<T> =
+export type DesignerResult<T> =
     T extends ReadonlyArray<infer Item>
         ? ReadonlyArray<DesignerResult<Item>>
         : T extends object
@@ -94,7 +105,9 @@ const pythonLiteral = (value: unknown): string => {
 };
 
 const isPythonExpression = (value: unknown): value is PythonExpression =>
-    typeof value === "object" && value !== null && "expression" in value;
+    (typeof value === "object" || typeof value === "function") &&
+    value !== null &&
+    typeof (value as PythonExpression).expression === "string";
 
 type TypeName = keyof typeof D3_MEMBER_METADATA | string;
 
@@ -122,6 +135,29 @@ const createProxy = <T>(
         get(target, property) {
             if (property === "expression") return target.expression;
             if (property === "then") return undefined;
+            if (property === "map") {
+                if (typeName.startsWith("TimeSequence<"))
+                    return (
+                        callback: (
+                            item: DesignerValue<unknown>,
+                            index: DesignerValue<number>,
+                        ) => unknown,
+                    ) =>
+                        createMappedTimeSequence(
+                            connection,
+                            target.expression,
+                            typeName.slice(13, -1),
+                            callback,
+                        );
+                const itemType = arrayItemType(typeName);
+                return (callback: (item: DesignerValue<unknown>) => unknown) =>
+                    createMappedProperty(
+                        connection,
+                        target.expression,
+                        itemType ?? "unknown",
+                        callback,
+                    );
+            }
             const nextExpression = target.expression
                 ? `${target.expression}.${String(property)}`
                 : String(property);
@@ -159,6 +195,19 @@ const createPropertyProxy = <T>(
                 );
             }
             if (property === "map") {
+                if (typeName.startsWith("TimeSequence<"))
+                    return (
+                        callback: (
+                            item: DesignerValue<unknown>,
+                            index: DesignerValue<number>,
+                        ) => unknown,
+                    ) =>
+                        createMappedTimeSequence(
+                            connection,
+                            expression,
+                            typeName.slice(13, -1),
+                            callback,
+                        );
                 const itemType = arrayItemType(typeName);
                 return (callback: (item: DesignerValue<unknown>) => unknown) =>
                     createMappedProperty(
@@ -193,11 +242,50 @@ const createMappedProperty = (
     itemType: TypeName,
     callback: (item: DesignerValue<unknown>) => unknown,
 ) => {
-    const item = createProxy<unknown>(connection, "item", itemType);
+    const usedVariables = new Set(
+        [...expression.matchAll(/\bitem\d*\b/g)].map((match) => match[0]),
+    );
+    let variable = "item";
+    let suffix = 0;
+    while (usedVariables.has(variable)) variable = `item${++suffix}`;
+    const item = createProxy<unknown>(connection, variable, itemType);
     const selected = callback(item);
     return createPropertyProxy<ReadonlyArray<unknown>>(
         connection,
-        `[${pythonLiteral(selected)} for item in ${expression}]`,
+        `[${pythonLiteral(selected)} for ${variable} in ${expression}]`,
+        "ReadonlyArray<unknown>",
+    );
+};
+
+const createMappedTimeSequence = (
+    connection: DisguiseConnection,
+    expression: string,
+    itemType: TypeName,
+    callback: (
+        item: DesignerValue<unknown>,
+        index: DesignerValue<number>,
+    ) => unknown,
+) => {
+    const usedVariables = new Set(
+        [...expression.matchAll(/\b(?:item\d*|i\d*)\b/g)].map(
+            (match) => match[0],
+        ),
+    );
+    let indexVariable = "i";
+    let suffix = 0;
+    while (usedVariables.has(indexVariable)) indexVariable = `i${++suffix}`;
+    const item = createProxy<unknown>(
+        connection,
+        `${expression}.getV(${indexVariable})`,
+        itemType,
+    );
+    const selected = callback(
+        item,
+        createProxy<number>(connection, indexVariable, "number"),
+    );
+    return createPropertyProxy<ReadonlyArray<unknown>>(
+        connection,
+        `[${pythonLiteral(selected)} for ${indexVariable} in range(${expression}.n())]`,
         "ReadonlyArray<unknown>",
     );
 };
@@ -253,6 +341,32 @@ const createResultProxy = <T>(
                         `${expression}[${String(property)}]`,
                         itemType ?? "unknown",
                     );
+                }
+                if (property === "map" && typeName) {
+                    if (typeName.startsWith("TimeSequence<"))
+                        return (
+                            callback: (
+                                item: DesignerValue<unknown>,
+                                index: DesignerValue<number>,
+                            ) => unknown,
+                        ) =>
+                            createMappedTimeSequence(
+                                connection,
+                                expression,
+                                typeName.slice(13, -1),
+                                callback,
+                            );
+                    const itemType = arrayItemType(typeName);
+                    if (itemType)
+                        return (
+                            callback: (item: DesignerValue<unknown>) => unknown,
+                        ) =>
+                            createMappedProperty(
+                                connection,
+                                expression,
+                                itemType,
+                                callback,
+                            );
                 }
                 const metadata = typeName ? typeMetadata(typeName) : undefined;
                 const propertyName = String(property);
@@ -324,15 +438,21 @@ export interface DisguiseConnectionOptions {
 export class DisguiseConnection {
     public readonly session: D3Session;
     public readonly liveUpdate: LiveUpdate;
+    public readonly common: Common;
+    public readonly query: Query;
     public readonly d3: DesignerValue<D3Globals>;
     public readonly types: D3TypeRegistry;
     public readonly objects: DesignerPathNode;
+    public readonly transports: TransportClient;
 
     public constructor(options: DisguiseConnectionOptions = {}) {
         this.session =
             options.session ??
             new D3Session(options.hostname ?? "localhost", options.port ?? 80);
         this.liveUpdate = new LiveUpdate(this.session);
+        this.common = new Common(this);
+        this.query = new Query(this);
+        this.transports = new TransportClient(this.session);
         this.d3 = createProxy<D3Globals>(this, "", "D3Globals");
         this.types = createTypeRegistry(this);
         this.objects = createPathNode(this, "objects");
@@ -349,7 +469,14 @@ export class DisguiseConnection {
         return this.execute<T>({ script: `return ${expression}` }, timeoutMs);
     }
 
-    public expression<T = unknown>(expression: string): DesignerValue<T> {
-        return createProxy<T>(this, expression);
+    public request<T>(endpoint: string) {
+        return this.session.request<T>("GET", endpoint);
+    }
+
+    public expression<T = unknown>(
+        expression: string,
+        typeName = "D3Globals",
+    ): DesignerValue<T> {
+        return createProxy<T>(this, expression, typeName);
     }
 }
