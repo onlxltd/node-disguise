@@ -36,12 +36,14 @@ export async function d3ApiRequest<T = unknown>(
         `http://${hostname}:${port}/${endpoint.replace(/^\//, "")}`,
         { ...init, method },
     );
-    const body: unknown = await response.json();
-    if (!response.ok)
+    const responseBody = await response.text();
+    if (!response.ok) {
+        const detail = responseBody.trim();
         throw new Error(
-            `Designer API HTTP ${response.status}: ${response.statusText}`,
+            `Designer API HTTP ${response.status}: ${detail || response.statusText}`,
         );
-    return body as T;
+    }
+    return JSON.parse(responseBody) as T;
 }
 
 export async function d3ApiExecute<T = unknown>(
